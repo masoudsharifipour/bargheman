@@ -19,6 +19,7 @@ import os
 from datetime import time, datetime, timedelta
 import pytz
 from config import Config
+from telegram.ext import Application
 
 # تنظیمات امنیتی
 MAX_RETRIES = 3
@@ -206,64 +207,110 @@ async def get_user_bills(auth_token: str):
         return None
 
 async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
-    """تابع زمان‌بندی شده برای بررسی روزانه خاموشی‌ها"""
     logger.info("🔍 شروع بررسی خودکار خاموشی‌ها...")
-    
-    # تنظیم منطقه زمانی ایران
-    tehran_tz = pytz.timezone('Asia/Tehran')
-    today = datetime.now(tehran_tz).strftime('%Y-%m-%d')
     
     for chat_id, user_info in user_data.items():
         try:
-            # بررسی وجود اطلاعات لازم
             if not all(k in user_info for k in ['token', 'bill_id']):
                 continue
                 
-            # دریافت اطلاعات خاموشی‌ها
-            blackouts = await get_blackouts(user_info['token'], user_info['bill_id'], today)
+            # دریافت خاموشی‌ها با تابع جدید
+            result = await get_blackouts(user_info['token'], user_info['bill_id'])
             
-            if blackouts:
-                message = f"⚠️ هشدار خاموشی برای امروز ({today}):\n\n"
-                for outage in blackouts:
+            if not result:
+                continue
+                
+            # ساخت پیام اطلاع‌رسانی
+            message = f"⚠️ هشدار خاموشی برای بازه {result['date_range']['from']} تا {result['date_range']['to']}:\n\n"
+            
+            if result['occurred']:
+                message += "\n🔴 خاموشی‌های رخ داده:\n"
+                for i, item in enumerate(result['occurred'], 1):
                     message += (
-                        f"⏰ زمان: {outage.get('outage_start_time', '?')}-{outage.get('outage_stop_time', '?')}\n"
-                        f"📍 منطقه: {outage.get('outage_address', '?')}\n"
-                        f"📌 دلیل: {outage.get('outage_reason', 'نامشخص')}\n\n"
+                        f"{i}. 📅 {item.get('outage_date', '?')} "
+                        f"⏰ {item.get('outage_start_time', '?')}-{item.get('outage_stop_time', '?')}\n"
+                        f"📍 {item.get('outage_address', '?')}\n\n"
                     )
-                
-                # ارسال پیام به کاربر
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=message,
-                    disable_notification=False
-                )
-                logger.info(f"📢 اطلاع‌رسانی خاموشی به کاربر {chat_id} ارسال شد")
-                
+            
+            if result['planned']:
+                message += "\n🟡 خاموشی‌های برنامه‌ریزی شده:\n"
+                for i, item in enumerate(result['planned'], 1):
+                    message += (
+                        f"{i}. 📅 {item.get('outage_date', '?')} "
+                        f"⏰ {item.get('outage_start_time', '?')}-{item.get('outage_stop_time', '?')}\n"
+                        f"📍 {item.get('outage_address', '?')}\n\n"
+                    )
+            
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                disable_notification=False
+            )
+            
         except Exception as e:
-            logger.error(f"خطا در بررسی کاربر {chat_id}: {str(e)}")
+            logger.error(f"Error processing user {chat_id}: {str(e)}")
 
-async def get_blackouts(token: str, bill_id: str, date: str):
-    """دریافت لیست خاموشی‌های یک تاریخ خاص"""
+async def get_blackouts(token: str, bill_id: str):
+    """دریافت لیست خاموشی‌ها با همان منطق check_blackouts اما فقط بازگشت داده"""
     headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
+        "accept": "application/json",
+        "authorization": f"Bearer {token}",
+        "content-type": "application/json",
+        "origin": "https://ios.bargheman.com",
+        "referer": "https://ios.bargheman.com/",
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
+    DATE, TO_DATE = get_jalali_dates()
+    logger.info(f"Getting blackouts from {DATE} to {TO_DATE} for bill {bill_id}")
+    
     try:
-        response = requests.post(
+        session = create_session()
+        
+        # 1. دریافت خاموشی‌های رخ داده
+        r1 = session.post(
             "https://uiapi.saapa.ir/api/ebills/BlackoutsReport",
             headers=headers,
-            json={"bill_id": bill_id, "date": date},
-            timeout=20
+            json={"bill_id": bill_id, "date": DATE},
+            timeout=30
         )
+        r1.raise_for_status()
         
-        if response.status_code == 200:
-            return response.json().get('data', [])
-        return []
+        # 2. دریافت خاموشی‌های برنامه‌ریزی شده
+        r2 = session.post(
+            "https://uiapi.saapa.ir/api/ebills/PlannedBlackoutsReport",
+            headers=headers,
+            json={"bill_id": bill_id, "from_date": DATE, "to_date": TO_DATE},
+            timeout=30
+        )
+        r2.raise_for_status()
         
-    except requests.exceptions.RequestException:
-        return []
-# --- بررسی خاموشی ---
+        data1 = r1.json().get("data", [])
+        data2 = r2.json().get("data", [])
+        
+        # ساخت ساختار یکسان برای همه خاموشی‌ها
+        blackouts = {
+            "occurred": data1,
+            "planned": data2,
+            "date_range": {
+                "from": DATE,
+                "to": TO_DATE
+            }
+        }
+        
+        return blackouts
+        
+    except requests.exceptions.Timeout:
+        logger.error("Timeout in getting blackouts")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request error in getting blackouts: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in getting blackouts: {str(e)}", exc_info=True)
+        return None
+        
+    # --- بررسی خاموشی ---
 async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.message.chat_id)
     user = user_data.get(chat_id, {})
@@ -597,28 +644,64 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "❌ حذف عضویت":
         await delete_account(update, context)
 
+async def setup_scheduler(application: Application):
+    """تنظیم زمان‌بندی بررسی خودکار"""
+    job_queue = application.job_queue
+    if job_queue:
+        tehran_tz = pytz.timezone('Asia/Tehran')
+        
+        # زمان‌بندی اصلی (8 صبح)
+        target_time = time(hour=00, minute=22, tzinfo=tehran_tz)
+        job_queue.run_daily(
+            callback=check_and_notify,
+            time=target_time,
+            name="daily_blackout_check",
+            job_kwargs={'misfire_grace_time': 3600}
+        )
+        logger.info("⏰ زمان‌بندی بررسی روزانه تنظیم شد (8 صبح)")
+        
+        # تست فوری - 1 دقیقه بعد از راه‌اندازی
+        job_queue.run_once(
+            callback=lambda ctx: logger.info("✅ تست زمان‌بندی موفق بود!"),
+            when=60,
+            name="test_scheduler"
+        )
+    else:
+        logger.error("❌ Job queue در دسترس نیست!")
+        # راه‌حل جایگزین با asyncio
+        asyncio.create_task(manual_scheduler(application))
+
+async def manual_scheduler(application: Application):
+    """راه‌حل جایگزین زمانی که Job Queue کار نمی‌کند"""
+    while True:
+        tehran_tz = pytz.timezone('Asia/Tehran')
+        now = datetime.now(tehran_tz)
+        
+        if now.hour == 8 and now.minute == 0:
+            await check_and_notify(application)
+            await asyncio.sleep(60)  # حداقل 1 دقیقه قبل از چک مجدد
+        else:
+            await asyncio.sleep(30)  # هر 30 ثانیه چک کند
 
 # --- تنظیمات اصلی ربات ---
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
     
-    # اضافه کردن هندلر خطا
+    # تنظیم هندلرها
     app.add_error_handler(error_handler)
 
-    # تنظیم ConversationHandler برای عضویت
     conv_handler = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex("^✅ عضویت جهت اطلاع‌رسانی$"), start_registration)],
-    states={
-        GET_MOBILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_mobile)],
-        GET_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_otp)],
-        SELECT_BILL: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_bill)],
-        "CONFIRM_DELETION": [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_deletion)],
-    },
-    fallbacks=[CommandHandler('cancel', cancel)],
-    allow_reentry=True
-)
+        entry_points=[MessageHandler(filters.Regex("^✅ عضویت جهت اطلاع‌رسانی$"), start_registration)],
+        states={
+            GET_MOBILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_mobile)],
+            GET_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_otp)],
+            SELECT_BILL: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_bill)],
+            "CONFIRM_DELETION": [MessageHandler(filters.TEXT & ~filters.COMMAND, confirm_deletion)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)],
+        allow_reentry=True
+    )
 
-    # تنظیم ConversationHandler برای حذف حساب
     deletion_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex("^❌ حذف عضویت$"), delete_account)],
         states={
@@ -627,27 +710,24 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
- # تنظیم زمان‌بندی برای بررسی روزانه
-    job_queue = app.job_queue
-    if job_queue:
-        # زمان اجرا: هر روز ساعت ۸ صبح به وقت تهران
-        target_time = time(hour=10, minute=0, tzinfo=pytz.timezone('Asia/Tehran'))
-        job_queue.run_daily(
-            callback=check_and_notify,
-            time=target_time,
-            name="daily_blackout_check"
-        )
-        logger.info("⏰ زمان‌بندی بررسی روزانه خاموشی تنظیم شد")
-
-    # اضافه کردن همه هندلرها
+    # اضافه کردن هندلرها
     app.add_handler(CommandHandler("start", start))
     app.add_handler(conv_handler)
-    app.add_handler(deletion_handler)  # اضافه کردن هندلر حذف حساب
+    app.add_handler(deletion_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
+
+    # راه‌حل جایگزین برای زمان‌بندی
+    async def post_init(application: Application):
+        """تابعی که بعد از راه‌اندازی اجرا می‌شود"""
+        await setup_scheduler(application)
+
+    # اجرای ربات با زمان‌بندی
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(post_init(app))
+    app.run_polling()
 
     logger.info("✅ ربات شروع به کار کرد")
 
-    app.run_polling()
 
 if __name__ == "__main__":
     main()
