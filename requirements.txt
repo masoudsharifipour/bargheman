@@ -1,6 +1,7 @@
-python-telegram-bot==20.7
-python-dotenv==1.0.0
+python-telegram-bot==21.1
+python-dotenv==1.0.1
 requests==2.31.0
 cryptography==41.0.7
 pytz==2024.1
-urllib3==2.1.0 
+urllib3==2.1.0
+jdatetime==4.1.1 

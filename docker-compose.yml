@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  bot:
+    image: masoudsharifi/bargheman:latest
+    container_name: bargheman_bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Tehran
+    networks:
+      - bot_network
+
+networks:
+  bot_network:
+    driver: bridge 

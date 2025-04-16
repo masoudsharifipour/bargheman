@@ -651,14 +651,14 @@ async def setup_scheduler(application: Application):
         tehran_tz = pytz.timezone('Asia/Tehran')
         
         # زمان‌بندی اصلی (8 صبح)
-        target_time = time(hour=00, minute=22, tzinfo=tehran_tz)
+        target_time = time(hour=10, minute=00, tzinfo=tehran_tz)
         job_queue.run_daily(
             callback=check_and_notify,
             time=target_time,
             name="daily_blackout_check",
             job_kwargs={'misfire_grace_time': 3600}
         )
-        logger.info("⏰ زمان‌بندی بررسی روزانه تنظیم شد (8 صبح)")
+        logger.info("⏰ زمان‌بندی بررسی روزانه تنظیم شد (10 صبح)")
         
         # تست فوری - 1 دقیقه بعد از راه‌اندازی
         job_queue.run_once(

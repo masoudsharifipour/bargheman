@@ -1,0 +1,51 @@
+# فایل‌های گیت
+.git
+.gitignore
+
+# فایل‌های پایتون
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# فایل‌های محیطی
+.env
+.env.*
+!.env.example
+
+# فایل‌های لاگ
+*.log
+logs/
+
+# فایل‌های داده
+data/
+user_data.json
+secret.key
+
+# فایل‌های سیستم
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# فایل‌های داکر
+Dockerfile
+docker-compose.yml
+.dockerignore 
