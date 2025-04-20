@@ -21,12 +21,17 @@ import pytz
 from config import Config
 from telegram.ext import Application
 
-# تنظیمات امنیتی
+# --- تنظیمات امنیتی ---
 MAX_RETRIES = 3
-RATE_LIMIT = 5  # تعداد درخواست‌های مجاز در دقیقه
 MOBILE_PATTERN = r'^09[0-9]{9}$'
 OTP_PATTERN = r'^\d{6}$'
 
+# --- تنظیمات Rate Limiting ---
+RATE_LIMIT = {
+    'daily_limit': 5,
+    'window_hours': 24
+}
+user_rate_limits = {}  # ذخیره وضعیت Rate Limit کاربران
 TOKEN = Config.TOKEN
 USER_DATA_FILE = Config.USER_DATA_FILE
 
@@ -52,6 +57,49 @@ def validate_mobile(mobile: str) -> bool:
 def validate_otp(otp: str) -> bool:
     """اعتبارسنجی کد OTP"""
     return bool(re.match(OTP_PATTERN, otp))
+
+# --- مدیریت Rate Limiting ---
+def check_rate_limit(chat_id: str) -> tuple:
+    """بررسی Rate Limit برای کاربر"""
+    now = datetime.now()
+    chat_id = str(chat_id)
+    
+    if chat_id not in user_rate_limits:
+        # کاربر جدید، محدودیتی ندارد
+        user_rate_limits[chat_id] = {
+            'count': 1,
+            'first_request': now,
+            'last_request': now
+        }
+        return True, RATE_LIMIT['daily_limit'] - 1, None
+    
+    user_limit = user_rate_limits[chat_id]
+    time_diff = (now - user_limit['first_request']).total_seconds() / 3600  # به ساعت
+    
+    if time_diff > RATE_LIMIT['window_hours']:
+        # بازه زمانی جدید، ریست محدودیت
+        user_rate_limits[chat_id] = {
+            'count': 1,
+            'first_request': now,
+            'last_request': now
+        }
+        return True, RATE_LIMIT['daily_limit'] - 1, None
+    
+    if user_limit['count'] >= RATE_LIMIT['daily_limit']:
+        # کاربر به محدودیت رسیده
+        reset_time = user_limit['first_request'] + timedelta(hours=RATE_LIMIT['window_hours'])
+        return False, 0, reset_time
+    
+    # افزایش تعداد درخواست‌ها
+    user_rate_limits[chat_id]['count'] += 1
+    remaining = RATE_LIMIT['daily_limit'] - user_rate_limits[chat_id]['count']
+    return True, remaining, None
+
+async def reset_daily_limits(context: ContextTypes.DEFAULT_TYPE):
+    """ریست روزانه محدودیت‌های کاربران"""
+    global user_rate_limits
+    logger.info("♻️ ریست روزانه محدودیت‌های درخواست کاربران")
+    user_rate_limits = {}
 
 # --- مدیریت خطا ---
 async def safe_api_call(func, *args, **kwargs):
@@ -89,7 +137,8 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ خطایی رخ داد. لطفاً دوباره تلاش کنید.")
         except:
             pass
-# اضافه کردن این توابع به فایل
+
+# --- توابع رمزنگاری ---
 def generate_key():
     key = Fernet.generate_key()
     with open("secret.key", "wb") as key_file:
@@ -214,13 +263,22 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
             if not all(k in user_info for k in ['token', 'bill_id']):
                 continue
                 
-            # دریافت خاموشی‌ها با تابع جدید
             result = await get_blackouts(user_info['token'], user_info['bill_id'])
             
             if not result:
+                # اگر نتیجه خالی بود، پیام مناسب ارسال شود
+                DATE, TO_DATE = get_jalali_dates()  # دریافت تاریخ‌های جاری
+                message = (
+                    f"🔍 بررسی خودکار برای بازه {DATE} تا {TO_DATE}\n"
+                    "✅ هیچ خاموشی (قطع برق) برنامه‌ریزی شده یا رخ داده‌ای یافت نشد."
+                )
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    disable_notification=False
+                )
                 continue
                 
-            # ساخت پیام اطلاع‌رسانی
             message = f"⚠️ هشدار خاموشی برای بازه {result['date_range']['from']} تا {result['date_range']['to']}:\n\n"
             
             if result['occurred']:
@@ -231,6 +289,8 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
                         f"⏰ {item.get('outage_start_time', '?')}-{item.get('outage_stop_time', '?')}\n"
                         f"📍 {item.get('outage_address', '?')}\n\n"
                     )
+            else:
+                message += "\n🔴 خاموشی‌های رخ داده: موردی یافت نشد\n\n"
             
             if result['planned']:
                 message += "\n🟡 خاموشی‌های برنامه‌ریزی شده:\n"
@@ -240,6 +300,8 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
                         f"⏰ {item.get('outage_start_time', '?')}-{item.get('outage_stop_time', '?')}\n"
                         f"📍 {item.get('outage_address', '?')}\n\n"
                     )
+            else:
+                message += "\n🟡 خاموشی‌های برنامه‌ریزی شده: موردی یافت نشد\n\n"
             
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -249,6 +311,17 @@ async def check_and_notify(context: ContextTypes.DEFAULT_TYPE):
             
         except Exception as e:
             logger.error(f"Error processing user {chat_id}: {str(e)}")
+            # در صورت خطا هم پیام مناسبی ارسال شود
+            DATE, TO_DATE = get_jalali_dates()
+            error_message = (
+                f"⚠️ خطا در بررسی خاموشی‌ها برای بازه {DATE} تا {TO_DATE}\n"
+                "لطفاً به صورت دستی بررسی کنید یا بعداً مجدداً تلاش نمایید."
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=error_message,
+                disable_notification=False
+            )
 
 async def get_blackouts(token: str, bill_id: str):
     """دریافت لیست خاموشی‌ها با همان منطق check_blackouts اما فقط بازگشت داده"""
@@ -267,7 +340,6 @@ async def get_blackouts(token: str, bill_id: str):
     try:
         session = create_session()
         
-        # 1. دریافت خاموشی‌های رخ داده
         r1 = session.post(
             "https://uiapi.saapa.ir/api/ebills/BlackoutsReport",
             headers=headers,
@@ -276,7 +348,6 @@ async def get_blackouts(token: str, bill_id: str):
         )
         r1.raise_for_status()
         
-        # 2. دریافت خاموشی‌های برنامه‌ریزی شده
         r2 = session.post(
             "https://uiapi.saapa.ir/api/ebills/PlannedBlackoutsReport",
             headers=headers,
@@ -288,7 +359,6 @@ async def get_blackouts(token: str, bill_id: str):
         data1 = r1.json().get("data", [])
         data2 = r2.json().get("data", [])
         
-        # ساخت ساختار یکسان برای همه خاموشی‌ها
         blackouts = {
             "occurred": data1,
             "planned": data2,
@@ -310,13 +380,22 @@ async def get_blackouts(token: str, bill_id: str):
         logger.error(f"Unexpected error in getting blackouts: {str(e)}", exc_info=True)
         return None
         
-    # --- بررسی خاموشی ---
 async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.message.chat_id)
-    user = user_data.get(chat_id, {})
     
-    # لاگ اطلاعات کاربر برای دیباگ
-    logger.info(f"Checking blackouts for user: {user}")
+    # بررسی Rate Limit
+  # بررسی Rate Limit
+    allowed, remaining, reset_time = check_rate_limit(chat_id)
+    if not allowed:
+        reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S") if reset_time else "پس از 24 ساعت"
+        await update.message.reply_text(
+            f"⚠️ شما به سقف درخواست‌های روزانه ({RATE_LIMIT['daily_limit']}) رسیده‌اید.\n"
+            f"⏳ لطفاً پس از {reset_str} دوباره تلاش کنید.",
+            reply_markup=get_menu_markup(chat_id)
+        )
+        return
+    
+    user = user_data.get(chat_id, {})
     
     if not user.get('token') or not user.get('bill_id'):
         error_msg = "⚠️ شما هنوز وارد نشده‌اید یا قبضی انتخاب نکرده‌اید."
@@ -338,14 +417,11 @@ async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "referer": "https://ios.bargheman.com/",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
-    
     try:
         await update.message.reply_text(f"🔍 در حال بررسی برای بازه زمانی {DATE} تا {TO_DATE}...")
         
-        # استفاده از session با retry
         session = create_session()
         
-        # درخواست اول - خاموشی‌های رخ داده
         r1 = session.post(
             "https://uiapi.saapa.ir/api/ebills/BlackoutsReport",
             headers=headers,
@@ -355,7 +431,6 @@ async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"BlackoutsReport response: {r1.status_code} - {r1.text}")
         r1.raise_for_status()
         
-        # درخواست دوم - خاموشی‌های برنامه‌ریزی شده
         r2 = session.post(
             "https://uiapi.saapa.ir/api/ebills/PlannedBlackoutsReport",
             headers=headers,
@@ -399,6 +474,13 @@ async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_menu_markup(chat_id)
         )
         
+        # اطلاع رسانی تعداد درخواست‌های باقیمانده
+        if remaining is not None and remaining < 3:
+            await update.message.reply_text(
+                f"ℹ️ شما {remaining} درخواست باقی مانده تا پایان امروز دارید.",
+                reply_markup=get_menu_markup(chat_id)
+            )
+
     except requests.exceptions.Timeout:
         error_msg = "⏳ سرور پاسخگو نیست. لطفاً چند دقیقه دیگر تلاش کنید."
         logger.error(error_msg)
@@ -420,7 +502,7 @@ async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg,
             reply_markup=get_menu_markup(chat_id)
         )
-
+    
 # --- دستور /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.message.chat_id)
@@ -433,7 +515,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.message.chat_id)
     
-    # بررسی آیا کاربر قبلاً عضو شده
     if chat_id in user_data:
         user = user_data[chat_id]
         await update.message.reply_text(
@@ -441,7 +522,7 @@ async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"📱 شماره: {user['mobile']}\n"
             f"🔹 قبض: {user['bill_title']}\n\n"
             f"برای تغییر اطلاعات، لطفاً ابتدا عضویت خود را حذف کنید.",
-            reply_markup=get_menu_markup(chat_id)  # تغییر اینجا
+            reply_markup=get_menu_markup(chat_id)
         )
         return ConversationHandler.END
     
@@ -453,7 +534,6 @@ async def start_registration(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # --- دریافت شماره موبایل و ارسال OTP ---
 async def get_mobile(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت و اعتبارسنجی شماره موبایل"""
     mobile = update.message.text.strip()
     
     if not validate_mobile(mobile):
@@ -479,7 +559,6 @@ async def get_mobile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- دریافت و تأیید OTP ---
 async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """دریافت و اعتبارسنجی کد OTP"""
     otp = update.message.text.strip()
     
     if not validate_otp(otp):
@@ -509,8 +588,7 @@ async def get_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not bills:
                 await update.message.reply_text(
                     "لطفا به سامانه مراجعه کرده و اطلاعات قبض خود را تعریف کنید. ⚠️ هیچ قبضی یافت نشد.",
-                    reply_markup=get_menu_markup(str(update.message.chat_id))
-                )
+                    reply_markup=get_menu_markup(str(update.message.chat_id)))
                 return ConversationHandler.END
             
             context.user_data['bills'] = bills
@@ -576,17 +654,17 @@ async def select_bill(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_menu_markup(chat_id)
     )
     return ConversationHandler.END
-    
 
 # --- لغو گفتگو ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.message.chat_id)  # دریافت chat_id
+    chat_id = str(update.message.chat_id)
     await update.message.reply_text(
         "عملیات لغو شد.", 
-        reply_markup=get_menu_markup(chat_id)  # استفاده از تابع get_menu_markup
+        reply_markup=get_menu_markup(chat_id)
     )
     return ConversationHandler.END
-# --- حذف دیتا---
+
+# --- حذف دیتا ---
 async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = str(update.message.chat_id)
     
@@ -605,7 +683,7 @@ async def delete_account(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text(
             "شما هنوز عضویتی ندارید.",
-            reply_markup=get_menu_markup(chat_id)  # تغییر اینجا
+            reply_markup=get_menu_markup(chat_id)
         )
         return ConversationHandler.END
     
@@ -636,10 +714,19 @@ async def confirm_deletion(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     chat_id = str(update.message.chat_id)
-
+    
     if text == "✅ عضویت جهت اطلاع‌رسانی":
         await start_registration(update, context)
     elif text == "📊 بررسی وضعیت خاموشی":
+        allowed, remaining, reset_time = check_rate_limit(chat_id)
+        if not allowed:
+            reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S")
+            await update.message.reply_text(
+                f"⚠️ شما به سقف درخواست‌های روزانه ({RATE_LIMIT['daily_limit']}) رسیده‌اید.\n"
+                f"لطفاً پس از {reset_str} دوباره تلاش کنید.",
+                reply_markup=get_menu_markup(chat_id))
+            return
+        
         await check_blackouts(update, context)
     elif text == "❌ حذف عضویت":
         await delete_account(update, context)
@@ -650,7 +737,7 @@ async def setup_scheduler(application: Application):
     if job_queue:
         tehran_tz = pytz.timezone('Asia/Tehran')
         
-        # زمان‌بندی اصلی (8 صبح)
+        # زمان‌بندی اصلی (10 صبح)
         target_time = time(hour=10, minute=00, tzinfo=tehran_tz)
         job_queue.run_daily(
             callback=check_and_notify,
@@ -658,14 +745,16 @@ async def setup_scheduler(application: Application):
             name="daily_blackout_check",
             job_kwargs={'misfire_grace_time': 3600}
         )
-        logger.info("⏰ زمان‌بندی بررسی روزانه تنظیم شد (10 صبح)")
         
-        # تست فوری - 1 دقیقه بعد از راه‌اندازی
-        job_queue.run_once(
-            callback=lambda ctx: logger.info("✅ تست زمان‌بندی موفق بود!"),
-            when=60,
-            name="test_scheduler"
+        # ریست روزانه محدودیت‌ها در نیمه شب
+        reset_time = time(hour=0, minute=0, tzinfo=tehran_tz)
+        job_queue.run_daily(
+            callback=reset_daily_limits,
+            time=reset_time,
+            name="reset_rate_limits"
         )
+        
+        logger.info("⏰ زمان‌بندی بررسی روزانه و ریست محدودیت‌ها تنظیم شد")
     else:
         logger.error("❌ Job queue در دسترس نیست!")
         # راه‌حل جایگزین با asyncio
@@ -679,9 +768,12 @@ async def manual_scheduler(application: Application):
         
         if now.hour == 8 and now.minute == 0:
             await check_and_notify(application)
-            await asyncio.sleep(60)  # حداقل 1 دقیقه قبل از چک مجدد
+            await asyncio.sleep(60)
+        elif now.hour == 0 and now.minute == 0:
+            await reset_daily_limits(application)
+            await asyncio.sleep(60)
         else:
-            await asyncio.sleep(30)  # هر 30 ثانیه چک کند
+            await asyncio.sleep(30)
 
 # --- تنظیمات اصلی ربات ---
 def main():
@@ -716,18 +808,15 @@ def main():
     app.add_handler(deletion_handler)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
 
-    # راه‌حل جایگزین برای زمان‌بندی
+    # اجرای ربات با زمان‌بندی
     async def post_init(application: Application):
-        """تابعی که بعد از راه‌اندازی اجرا می‌شود"""
         await setup_scheduler(application)
 
-    # اجرای ربات با زمان‌بندی
     loop = asyncio.get_event_loop()
     loop.run_until_complete(post_init(app))
     app.run_polling()
 
     logger.info("✅ ربات شروع به کار کرد")
-
 
 if __name__ == "__main__":
     main()

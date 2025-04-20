@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   bot:
-    image: masoudsharifi/bargheman:latest
+    image: masoudse7en/bargheman:latest
     container_name: bargheman_bot
     restart: unless-stopped
     volumes:
@@ -14,7 +14,15 @@ services:
       - TZ=Asia/Tehran
     networks:
       - bot_network
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
 
 networks:
   bot_network:
-    driver: bridge 
+    driver: bridge

@@ -1,46 +1,45 @@
-# استفاده از تصویر پایه پایتون
-FROM python:3.11-slim as builder
+# Dockerfile
 
-# تنظیم متغیرهای محیطی
+FROM python:3.13-alpine AS builder
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# نصب وابستگی‌های سیستم
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends gcc python3-dev && \
+    rm -rf /var/lib/apt/lists/*
 
-# کپی فایل‌های مورد نیاز
-COPY requirements.txt .
-
-# نصب وابستگی‌های پایتون
-RUN pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -r requirements.txt
-
-# مرحله نهایی
-FROM python:3.11-slim
-
-# ایجاد کاربر غیر root
-RUN useradd -m -u 1000 appuser && \
-    mkdir -p /app && \
-    chown -R appuser:appuser /app
-
-# تنظیم دایرکتوری کاری
 WORKDIR /app
 
-# کپی فایل‌های پروژه و wheels از مرحله builder
-COPY --from=builder /app/wheels /wheels
-COPY --from=builder requirements.txt .
-COPY --chown=appuser:appuser . .
+COPY requirements.txt .
 
-# نصب وابستگی‌ها از wheels
-RUN pip install --no-cache /wheels/* && \
-    rm -rf /wheels
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /wheels -r requirements.txt
 
-# تغییر کاربر به appuser
+# ---- Final image ----
+FROM python:3.13-alpine
+
+ENV PYTHONUNBUFFERED=1 \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Asia/Tehran
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -u 1000 appuser
+
+WORKDIR /app
+
+COPY --from=builder /wheels /wheels
+COPY --from=builder /app/requirements.txt .
+COPY . .
+
+RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
+
+RUN chown -R appuser:appuser /app
+
 USER appuser
 
-# اجرای ربات
-CMD ["python", "bot_test_p.py"] 
+CMD ["python", "bot_test_p.py"]
