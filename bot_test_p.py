@@ -22,6 +22,8 @@ from config import Config
 from telegram.ext import Application
 
 # --- تنظیمات امنیتی ---
+BASE_URI_PROXY = Config.BASE_URI_PROXY
+TIMEOUT = 55
 MAX_RETRIES = 3
 MOBILE_PATTERN = r'^09[0-9]{9}$'
 OTP_PATTERN = r'^\d{6}$'
@@ -184,7 +186,7 @@ user_data = load_user_data()
 
 # --- توابع API ---
 async def send_otp(mobile: str):
-    url = "https://uiapi.saapa.ir/api/otp/sendCode"
+    url = f"{BASE_URI_PROXY}/api/otp/sendCode"
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -195,7 +197,7 @@ async def send_otp(mobile: str):
     payload = {"mobile": mobile}
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -203,7 +205,7 @@ async def send_otp(mobile: str):
         return None
 
 async def verify_otp(mobile: str, code: str):
-    url = "https://uiapi.saapa.ir/api/otp/verifyCode"
+    url = f"{BASE_URI_PROXY}/api/otp/verifyCode"
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
@@ -219,7 +221,7 @@ async def verify_otp(mobile: str, code: str):
     }
     
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -237,7 +239,7 @@ def create_session():
     return session
 
 async def get_user_bills(auth_token: str):
-    url = "https://uiapi.saapa.ir/api/ebills/GetBills"
+    url = f"{BASE_URI_PROXY}/api/ebills/GetBills"
     headers = {
         "accept": "application/json",
         "authorization": f"Bearer {auth_token}",
@@ -341,18 +343,18 @@ async def get_blackouts(token: str, bill_id: str):
         session = create_session()
         
         r1 = session.post(
-            "https://uiapi.saapa.ir/api/ebills/BlackoutsReport",
+            f"{BASE_URI_PROXY}/api/ebills/BlackoutsReport",
             headers=headers,
             json={"bill_id": bill_id, "date": DATE},
-            timeout=30
+            timeout=TIMEOUT
         )
         r1.raise_for_status()
         
         r2 = session.post(
-            "https://uiapi.saapa.ir/api/ebills/PlannedBlackoutsReport",
+            f"{BASE_URI_PROXY}/api/ebills/PlannedBlackoutsReport",
             headers=headers,
             json={"bill_id": bill_id, "from_date": DATE, "to_date": TO_DATE},
-            timeout=30
+            timeout=TIMEOUT
         )
         r2.raise_for_status()
         
@@ -423,19 +425,19 @@ async def check_blackouts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session = create_session()
         
         r1 = session.post(
-            "https://uiapi.saapa.ir/api/ebills/BlackoutsReport",
+            f"{BASE_URI_PROXY}/api/ebills/BlackoutsReport",
             headers=headers,
             json={"bill_id": user['bill_id'], "date": DATE},
-            timeout=30
+            timeout=TIMEOUT
         )
         logger.info(f"BlackoutsReport response: {r1.status_code} - {r1.text}")
         r1.raise_for_status()
         
         r2 = session.post(
-            "https://uiapi.saapa.ir/api/ebills/PlannedBlackoutsReport",
+            f"{BASE_URI_PROXY}/api/ebills/PlannedBlackoutsReport",
             headers=headers,
             json={"bill_id": user['bill_id'], "from_date": DATE, "to_date": TO_DATE},
-            timeout=30
+            timeout=TIMEOUT
         )
         logger.info(f"PlannedBlackoutsReport response: {r2.status_code} - {r2.text}")
         r2.raise_for_status()
