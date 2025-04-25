@@ -19,7 +19,7 @@ class SecurityConfig:
 
 class Config:
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    BASE_URI_PROXY = os.environ.get('BASE_URI_PROXY', 'https://uiapi.saapa.ir')
+    BASE_URI_PROXY = os.environ.get('BASE_URI_PROXY')
     USER_DATA_FILE = str(USER_DATA_FILE)
     SECRET_KEY_FILE = str(SECRET_KEY_FILE)
     LOG_FILE = str(LOG_FILE)
