@@ -5,6 +5,7 @@ services:
     image: masoudse7en/bargheman:latest
     container_name: bargheman_bot
     restart: unless-stopped
+    platform: linux/amd64
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
@@ -17,7 +18,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '1'
+          cpus: '1.0'
           memory: 512M
         reservations:
           cpus: '0.5'
